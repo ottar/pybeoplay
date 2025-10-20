@@ -72,6 +72,9 @@ class BeoPlay(object):
         self.sourcesID = []
         self.sourcesBorrowed = []
         self.listeners = []
+        # Extra attributes for tracking primary experience
+        self.role = None
+        self.primary_jid = None
         # The following are only going ot be valid after a call to getSoundModes
         # Sound modes
         self._soundMode = None
@@ -803,12 +806,25 @@ class BeoPlay(object):
                 self.source = None
                 self.state = None
                 self.on = False
+                self.role = None
+                self.primary_jid = None
+                self.listeners = []
             else:
-                self.source = data["notification"]["data"]["primaryExperience"][
-                    "source"
-                ]["friendlyName"]
+                self.source = data["notification"]["data"]["primaryExperience"]["source"]["friendlyName"]
                 self.state = data["notification"]["data"]["primaryExperience"]["state"]
                 self.on = True
+                self.primary_jid = data["notification"]["data"]["primaryExperience"]["source"]["product"].get("jid")
+                self.listeners = data["notification"]["data"]["primaryExperience"].get("listener", [])
+                try:
+                    my_jid = f"{self._typeNumber}.{self._itemNumber}.{self._serialNumber}@products.bang-olufsen.com"
+                    if self.primary_jid == my_jid:
+                        self.role = "primary"
+                    elif my_jid in self.listeners:
+                        self.role = "listener"
+                    else:
+                        self.role = None
+                except Exception:
+                    self.role = None
             self.media_url = None
             self.media_track = None
             self.media_artist = None
@@ -822,8 +838,34 @@ class BeoPlay(object):
 #            self.primary_experience = data["primary"]
 
     def _processSourceExperienceChanged(self, data):
-        if data["notification"]["type"] == "SOURCE_EXPERIENCE_CHANGED":
-            self.listeners = data["notification"]["data"]["primaryExperience"]["listener"]
+        if (
+            data["notification"]["type"] == "SOURCE_EXPERIENCE_CHANGED"
+            and data["notification"]["data"] is not None
+        ):
+            if not data["notification"]["data"]:
+                self.role = None
+                self.primary_jid = None
+                self.listeners = []
+            else:
+                self.primary_jid = data["notification"]["data"]["primaryExperience"]["source"]["product"].get("jid")
+                self.listeners = data["notification"]["data"]["primaryExperience"].get("listener", [])
+                try:
+                    my_jid = f"{self._typeNumber}.{self._itemNumber}.{self._serialNumber}@products.bang-olufsen.com"
+                    if self.primary_jid == my_jid:
+                        self.role = "primary"
+                    elif my_jid in self.listeners:
+                        self.role = "listener"
+                    else:
+                        self.role = None
+                except Exception:
+                    self.role = None
+            LOG.debug(
+                "[%s] SOURCE_EXPERIENCE_CHANGED: role=%s, primary_jid=%s, listeners=%s",
+                getattr(self, "_name", "?"),
+                self.role,
+                self.primary_jid,
+                self.listeners,
+            )
 
     def _processState(self, data):
         """Progress information provides info about the current state of play. 
@@ -832,7 +874,14 @@ class BeoPlay(object):
             data["notification"]["type"] == "PROGRESS_INFORMATION"
             and data["notification"]["data"] is not None
         ):
-            self.state = data["notification"]["data"]["state"]
+#            self.state = data["notification"]["data"]["state"]
+            self.state = data["notification"]["data"].get("state")
+            if self.state in ("stop", "stopped", "off", "standby"):
+                self.on = False
+                self.role = None
+                self.primary_jid = None
+                self.listeners = []
+                LOG.debug("[%s] STATE indicates off/standby → cleared grouping", getattr(self, "_name", "?"))
 #            self.on = True
 
     def _processMusicInfo(self, data):
