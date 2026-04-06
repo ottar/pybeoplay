@@ -368,6 +368,13 @@ class BeoPlay(object):
     # COMMANDS - Non Blocking
     ###############################################################
 
+    async def async_get_volume(self):
+        """Fetch current speaker volume. Sets self.volume (0-1 range)."""
+        r = await self.async_getReq(BEOPLAY_URL_SET_VOLUME)
+        if r and "level" in r:
+            self.volume = r["level"] / 100
+        return self.volume
+
     async def async_set_volume(self, volume):
         self.volume = volume
         volume = int(volume * 100)
@@ -517,6 +524,10 @@ class BeoPlay(object):
         """
         payload = {"primaryExperience": {"source": {"id": source_id}}}
         return await self.async_postReq("POST", BEOPLAY_URL_ACTIVE_SOURCES, payload)
+
+    async def async_clear_queue(self):
+        """Delete all items from the play queue."""
+        await self.async_postReq("DELETE", BEOPLAY_URL_PLAYQUEUE)
 
     async def async_play_queue_item(self, instantplay: bool, queueItem: dict):
         """Play a queue item, from Deezer, TuneIn or DLNA.
