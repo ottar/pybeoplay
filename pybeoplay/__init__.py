@@ -203,9 +203,11 @@ class BeoPlay(object):
                 async with self._clientsession.post(
                     BASE_URL.format(self._host, path), json=jsondata, timeout=aiohttp.ClientTimeout(total=TIMEOUT)
                 ) as resp:
-                    LOG.debug("Status: %s", resp.status)
                     if resp.status != 200:
+                        body = await resp.text()
+                        LOG.warning("POST %s status=%s body=%s", path, resp.status, body[:200])
                         return False
+                    LOG.debug("Status: %s", resp.status)
             elif type == "DELETE":
                 async with self._clientsession.delete(
                     BASE_URL.format(self._host, path), timeout=aiohttp.ClientTimeout(total=TIMEOUT)
