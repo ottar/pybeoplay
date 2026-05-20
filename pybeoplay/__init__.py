@@ -456,10 +456,67 @@ class BeoPlay(object):
         await self.async_postReq("PUT", BEOPLAY_URL_STAND_ACTIVE, {"active": standPositionID})
 
     async def async_join_experience(self):
+        """Join whatever experience is currently active on the local network.
+
+        POSTs to /BeoZone/Zone/Device/OneWayJoin. The speaker picks up the
+        single playing experience automatically — no source-id needed —
+        but you don't get to choose which master to follow when several
+        speakers are playing different things at once. Use
+        ``async_borrow_source()`` for the targeted "A → B" join instead.
+        """
         await self.async_postReq("POST", BEOPLAY_URL_JOIN_EXPERIENCE)
 
     async def async_leave_experience(self):
+        """Leave any current borrowed experience.
+
+        DELETEs /BeoZone/Zone/ActiveSources/primaryExperience. After this
+        the speaker returns to its idle state (no primary source set).
+        Mirrors the leave-multiroom action exposed by the official Beo
+        app's room-grouping UI.
+        """
         await self.async_postReq("DELETE", BEOPLAY_URL_LEAVE_EXPERIENCE)
+
+    async def async_get_active_sources(self):
+        """Fetch the speaker's current /BeoZone/Zone/ActiveSources.
+
+        Useful for reading ``primaryExperience.source.id`` (needed by
+        ``async_borrow_source`` when joining another speaker) and
+        ``primaryExperience.source.product.jid`` (master ownership —
+        same value pushed onto ``self.primary_jid`` from notifications,
+        but a GET is more reliable when notifications have not arrived
+        yet, e.g. immediately after the speaker powers on).
+
+        Returns the parsed JSON or ``None`` on error.
+        """
+        return await self.async_getReq(BEOPLAY_URL_ACTIVE_SOURCES)
+
+    async def async_borrow_source(self, source_id: str):
+        """Start playing a specific source on this speaker.
+
+        POSTs ``{"primaryExperience": {"source": {"id": <source_id>}}}``
+        to /BeoZone/Zone/ActiveSources. When ``source_id`` is the active
+        source-id reported by another speaker on the network, the effect
+        is that this speaker joins that speaker's experience — the
+        canonical "join A → B" multiroom mechanism used by the official
+        Beo app.
+
+        Unlike ``async_join_experience`` (OneWayJoin, which picks the
+        single active experience automatically), this lets the caller
+        target a specific master when several speakers are playing
+        different things at once.
+
+        Typical flow to join this speaker (B) to another speaker (A)::
+
+            active = await beo_a.async_get_active_sources()
+            source_id = active["primaryExperience"]["source"]["id"]
+            await beo_b.async_borrow_source(source_id)
+
+        ``source_id`` can also be used to start a known external source
+        directly (radio, line-in) by passing its source-id from
+        ``async_get_sources()``.
+        """
+        payload = {"primaryExperience": {"source": {"id": source_id}}}
+        return await self.async_postReq("POST", BEOPLAY_URL_ACTIVE_SOURCES, payload)
 
     async def async_play_queue_item(self, instantplay: bool, queueItem: dict):
         """Play a queue item, from Deezer, TuneIn or DLNA.
