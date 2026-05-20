@@ -529,6 +529,97 @@ class BeoPlay(object):
         """Delete all items from the play queue."""
         await self.async_postReq("DELETE", BEOPLAY_URL_PLAYQUEUE)
 
+    async def async_get_play_queue(self, offset: int = -1000):
+        """Fetch the current play queue.
+
+        B&O paginates this endpoint: the default response only returns a
+        handful of items around playNowId (5 on the firmware verified
+        against — Beosound CA17). Pass a negative ``offset`` to start
+        that many items before the currently playing item; the response
+        will then include everything from there to the end of the queue.
+        ``-1000`` is a safe upper bound for "give me everything" — B&O
+        caps queue length well below that.
+
+        Returns the parsed JSON response or ``None`` on error. Shape::
+
+            {"playQueue": {
+                "playNowId":   "plid-5413",     # str on current firmware
+                "total":       int,
+                "offset":      int,
+                "startOffset": int,             # negative = items before current
+                "count":       int,
+                "repeat":      "off" | "track" | "all",
+                "random":      "off" | "on",
+                "playQueueItem": [
+                    {"id": "plid-5413",
+                     "behaviour": "planned",
+                     "track": {...},
+                     "_links": {
+                         "/relation/delete": {"href": "./plid-5413"},
+                         "/relation/insert": {"href": "./?id=plid-5413"},
+                         "/relation/move":   {"href": "./plid-5413?id={movebeforeid}",
+                                              "templated": true}
+                     }},
+                    ...
+                ]
+            }}
+
+        Each item exposes HATEOAS ``_links`` pointing at the matching
+        ``async_delete_queue_item`` / ``async_move_queue_item`` /
+        ``async_insert_queue_item`` operations below.
+        """
+        return await self.async_getReq(f"{BEOPLAY_URL_PLAYQUEUE}?offset={offset}")
+
+    async def async_delete_queue_item(self, item_id):
+        """Remove a single item from the play queue by its B&O id.
+
+        ``item_id`` is the queue-item id as reported by B&O — a string
+        like ``"plid-5413"`` on current firmware, an int on older ones.
+        It corresponds to the ``id`` field of a ``playQueueItem`` and is
+        the same value used in that item's ``_links/delete`` href.
+        """
+        return await self.async_postReq("DELETE", f"{BEOPLAY_URL_PLAYQUEUE}/{item_id}")
+
+    async def async_move_queue_item(self, item_id, before_id=None):
+        """Move an item to a new position in the play queue.
+
+        Without ``before_id`` the item is moved to the end of the queue.
+        With ``before_id`` it is moved to immediately before that item.
+        Both ids must already exist in the queue (use
+        ``async_insert_queue_item`` to add a new item at a specific
+        position).
+
+        Mirrors the HATEOAS template
+        ``./{item_id}?id={movebeforeid}`` exposed by each playQueueItem.
+        """
+        path = f"{BEOPLAY_URL_PLAYQUEUE}/{item_id}"
+        if before_id is not None:
+            path = f"{path}?id={before_id}"
+        return await self.async_postReq("PUT", path)
+
+    async def async_insert_queue_item(self, queueItem: dict, after_id=None):
+        """Insert a queue item at a specific position.
+
+        ``queueItem`` follows the same envelope as
+        ``async_play_queue_item`` — i.e. a dict of shape
+        ``{"playQueueItem": {"behaviour": ..., "track": {...}}}``.
+
+        Without ``after_id`` the item is appended to the end of the
+        queue (same as ``async_play_queue_item(instantplay=False, ...)``).
+
+        With ``after_id`` the item is inserted immediately after the
+        existing queue item with that id — useful for implementing
+        "play next" against the currently playing item's id.
+
+        Mirrors the HATEOAS template ``./?id={after_id}`` exposed by
+        each playQueueItem.
+        """
+        if after_id is None:
+            return await self.async_postReq("POST", BEOPLAY_URL_PLAYQUEUE, queueItem)
+        return await self.async_postReq(
+            "POST", f"{BEOPLAY_URL_PLAYQUEUE}?id={after_id}", queueItem,
+        )
+
     async def async_play_queue_item(self, instantplay: bool, queueItem: dict):
         """Play a queue item, from Deezer, TuneIn or DLNA.
         TuneIn Dict structure:
