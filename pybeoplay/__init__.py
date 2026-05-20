@@ -797,6 +797,60 @@ class BeoPlay(object):
             )
             self.muted = data["notification"]["data"]["speaker"]["muted"]
 
+    @property
+    def my_jid(self) -> Optional[str]:
+        """This speaker's own JID, built from productId fields.
+
+        Returns None until ``async_get_device_info()`` has populated
+        ``_typeNumber``, ``_itemNumber`` and ``_serialNumber``. The JID
+        format is the canonical
+        ``{typeNumber}.{itemNumber}.{serialNumber}@products.bang-olufsen.com``
+        — same value B&O reports as ``product.jid`` on its own
+        ActiveSources responses, so callers can compare against
+        ``self.primary_jid`` to detect role.
+        """
+        if not (self._typeNumber and self._itemNumber and self._serialNumber):
+            return None
+        return f"{self._typeNumber}.{self._itemNumber}.{self._serialNumber}@products.bang-olufsen.com"
+
+    def _clear_grouping_state(self) -> None:
+        """Drop grouping/role data — call when this speaker can no longer
+        be part of a multiroom session (standby, source cleared, etc.)."""
+        self.role = None
+        self.primary_jid = None
+        self.listeners = []
+
+    def _recompute_role(self) -> None:
+        """Derive ``self.role`` from ``self.primary_jid``, ``self.listeners``
+        and ``self.my_jid``.
+
+        Heuristic only — consumers that need authoritative multiroom-join
+        state should derive it themselves from ``primary_jid`` + ``listeners``
+        plus their own knowledge (e.g. whether the user explicitly /joined
+        this speaker). This property returns ``None`` rather than guessing
+        when ``my_jid`` isn't available yet (device info not fetched).
+        """
+        my = self.my_jid
+        if my is None:
+            self.role = None
+            return
+        if self.primary_jid == my:
+            self.role = "primary"
+        elif my in self.listeners:
+            self.role = "listener"
+        else:
+            self.role = None
+
+    def _update_grouping_from_primary_experience(self, primary_experience: dict) -> None:
+        """Extract primary_jid + listeners from a notification's
+        primaryExperience block and recompute role. Shared between
+        SOURCE and SOURCE_EXPERIENCE_CHANGED notifications."""
+        source = primary_experience.get("source") or {}
+        product = source.get("product") or {}
+        self.primary_jid = product.get("jid")
+        self.listeners = primary_experience.get("listener", []) or []
+        self._recompute_role()
+
     def _processSource(self, data):
         if (
             data["notification"]["type"] == "SOURCE"
@@ -806,25 +860,13 @@ class BeoPlay(object):
                 self.source = None
                 self.state = None
                 self.on = False
-                self.role = None
-                self.primary_jid = None
-                self.listeners = []
+                self._clear_grouping_state()
             else:
-                self.source = data["notification"]["data"]["primaryExperience"]["source"]["friendlyName"]
-                self.state = data["notification"]["data"]["primaryExperience"]["state"]
+                primary = data["notification"]["data"]["primaryExperience"]
+                self.source = primary["source"]["friendlyName"]
+                self.state = primary["state"]
                 self.on = True
-                self.primary_jid = data["notification"]["data"]["primaryExperience"]["source"]["product"].get("jid")
-                self.listeners = data["notification"]["data"]["primaryExperience"].get("listener", [])
-                try:
-                    my_jid = f"{self._typeNumber}.{self._itemNumber}.{self._serialNumber}@products.bang-olufsen.com"
-                    if self.primary_jid == my_jid:
-                        self.role = "primary"
-                    elif my_jid in self.listeners:
-                        self.role = "listener"
-                    else:
-                        self.role = None
-                except Exception:
-                    self.role = None
+                self._update_grouping_from_primary_experience(primary)
             self.media_url = None
             self.media_track = None
             self.media_artist = None
@@ -838,51 +880,43 @@ class BeoPlay(object):
 #            self.primary_experience = data["primary"]
 
     def _processSourceExperienceChanged(self, data):
-        if (
-            data["notification"]["type"] == "SOURCE_EXPERIENCE_CHANGED"
-            and data["notification"]["data"] is not None
-        ):
-            if not data["notification"]["data"]:
-                self.role = None
-                self.primary_jid = None
-                self.listeners = []
-            else:
-                self.primary_jid = data["notification"]["data"]["primaryExperience"]["source"]["product"].get("jid")
-                self.listeners = data["notification"]["data"]["primaryExperience"].get("listener", [])
-                try:
-                    my_jid = f"{self._typeNumber}.{self._itemNumber}.{self._serialNumber}@products.bang-olufsen.com"
-                    if self.primary_jid == my_jid:
-                        self.role = "primary"
-                    elif my_jid in self.listeners:
-                        self.role = "listener"
-                    else:
-                        self.role = None
-                except Exception:
-                    self.role = None
-            LOG.debug(
-                "[%s] SOURCE_EXPERIENCE_CHANGED: role=%s, primary_jid=%s, listeners=%s",
-                getattr(self, "_name", "?"),
-                self.role,
-                self.primary_jid,
-                self.listeners,
-            )
+        if data["notification"]["type"] != "SOURCE_EXPERIENCE_CHANGED":
+            return
+        payload = data["notification"]["data"]
+        # B&O sends ``data: null`` to signal the experience was torn down
+        # entirely, and ``data: {}`` for a transient empty update. Treat
+        # both as "no grouping" so we don't keep stale primary_jid/listeners.
+        if not payload:
+            self._clear_grouping_state()
+        else:
+            primary = payload.get("primaryExperience") or {}
+            self._update_grouping_from_primary_experience(primary)
+        LOG.debug(
+            "[%s] SOURCE_EXPERIENCE_CHANGED: role=%s, primary_jid=%s, listeners=%s",
+            getattr(self, "_name", "?"),
+            self.role,
+            self.primary_jid,
+            self.listeners,
+        )
 
     def _processState(self, data):
-        """Progress information provides info about the current state of play. 
-        It is only reliable if the device is on. """
-        if (
+        """Progress information provides info about the current state of play.
+        It is only reliable if the device is on."""
+        if not (
             data["notification"]["type"] == "PROGRESS_INFORMATION"
             and data["notification"]["data"] is not None
         ):
-#            self.state = data["notification"]["data"]["state"]
-            self.state = data["notification"]["data"].get("state")
-            if self.state in ("stop", "stopped", "off", "standby"):
-                self.on = False
-                self.role = None
-                self.primary_jid = None
-                self.listeners = []
-                LOG.debug("[%s] STATE indicates off/standby → cleared grouping", getattr(self, "_name", "?"))
-#            self.on = True
+            return
+        self.state = data["notification"]["data"].get("state")
+        # Stop / standby implies any multiroom session this speaker was
+        # part of is over — clear so consumers don't see stale role.
+        if self.state in ("stop", "stopped", "off", "standby"):
+            self.on = False
+            self._clear_grouping_state()
+            LOG.debug(
+                "[%s] STATE %s → cleared grouping",
+                getattr(self, "_name", "?"), self.state,
+            )
 
     def _processMusicInfo(self, data):
         if data["notification"]["type"] == "NOW_PLAYING_STORED_MUSIC":
