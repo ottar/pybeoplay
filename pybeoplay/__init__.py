@@ -183,10 +183,17 @@ class BeoPlay(object):
             raise
 
     async def async_postReq(self, type, path, jsondata: dict = {}):
-        """Non blocking POST call to the speaker, with a given path and JSON data.
-        type: PUT POST or DELETE
-        path: the path of the request
-        data: JSON data for the POST, in the form of Python dict/arrays
+        """Non blocking POST/PUT/DELETE call to the speaker.
+
+        ``type``: ``"PUT"`` | ``"POST"`` | ``"DELETE"``
+        ``path``: the URL path relative to the speaker base
+        ``jsondata``: JSON body (Python dict/list) — ignored for DELETE
+
+        Returns ``True`` when the device responds with any 2xx status
+        (200 OK, 201 Created, 202 Accepted, 204 No Content — all of
+        which B&O uses for different endpoints; PlayPointer for example
+        returns 204 on success). Returns ``False`` and logs the body
+        on non-2xx so callers can react.
         """
         if self._clientsession is None:
             LOG.error("Attempt asyncio with no ClientSession")
@@ -196,14 +203,16 @@ class BeoPlay(object):
                 async with self._clientsession.put(
                     BASE_URL.format(self._host, path), json=jsondata, timeout=aiohttp.ClientTimeout(total=TIMEOUT)
                 ) as resp:
-                    LOG.debug("Status: %s", resp.status)
-                    if resp.status != 200:
+                    if not (200 <= resp.status < 300):
+                        body = await resp.text()
+                        LOG.warning("PUT %s status=%s body=%s", path, resp.status, body[:200])
                         return False
+                    LOG.debug("Status: %s", resp.status)
             elif type == "POST":
                 async with self._clientsession.post(
                     BASE_URL.format(self._host, path), json=jsondata, timeout=aiohttp.ClientTimeout(total=TIMEOUT)
                 ) as resp:
-                    if resp.status != 200:
+                    if not (200 <= resp.status < 300):
                         body = await resp.text()
                         LOG.warning("POST %s status=%s body=%s", path, resp.status, body[:200])
                         return False
@@ -212,10 +221,11 @@ class BeoPlay(object):
                 async with self._clientsession.delete(
                     BASE_URL.format(self._host, path), timeout=aiohttp.ClientTimeout(total=TIMEOUT)
                 ) as resp:
-                    LOG.debug("Status: %s", resp.status)
-                    if resp.status != 200:
+                    if not (200 <= resp.status < 300):
+                        body = await resp.text()
+                        LOG.warning("DELETE %s status=%s body=%s", path, resp.status, body[:200])
                         return False
-
+                    LOG.debug("Status: %s", resp.status)
             else:
                 return False
         except (asyncio.TimeoutError, aiohttp.ClientError) as _e:
@@ -598,6 +608,25 @@ class BeoPlay(object):
         if before_id is not None:
             path = f"{path}?id={before_id}"
         return await self.async_postReq("PUT", path)
+
+    async def async_set_play_pointer(self, item_id):
+        """Jump playback to a specific item already in the play queue.
+
+        POSTs ``{"playPointer": {"playQueueItemId": <item_id>}}`` to
+        ``/BeoZone/Zone/PlayQueue/PlayPointer``. The speaker starts
+        playing the named item immediately and updates its internal
+        playNowId to match. Use this for "jump to this row in the queue
+        UI" — much cheaper than clearing and re-pushing the queue.
+
+        ``item_id`` is the same opaque queue-item id used everywhere
+        else (``"plid-5413"`` on current firmware, int on legacy).
+
+        B&O returns 204 No Content on success. PUT against the same
+        endpoint returns 400 — this method intentionally uses POST.
+        """
+        path = f"{BEOPLAY_URL_PLAYQUEUE}/PlayPointer"
+        payload = {"playPointer": {"playQueueItemId": item_id}}
+        return await self.async_postReq("POST", path, payload)
 
     async def async_insert_queue_item(self, queueItem: dict, after_id=None):
         """Insert a queue item at a specific position.
