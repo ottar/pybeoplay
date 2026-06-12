@@ -719,12 +719,239 @@ class BeoPlay(object):
 
     async def async_digits(self, digit : str):
         """
-        Send a digit keypress to the device. Digits are 0-9  
+        Send a digit keypress to the device. Digits are 0-9.
 
+        Note: the device expects an integer body ({"digits": 3}); a string
+        ({"digits": "3"}) is rejected with 400 on current firmware (verified
+        on Beosound Stage). This method casts with int() accordingly.
         """
         if (digit not in BEOPLAY_DIGITS):
             return
         await self.async_postReq("POST", BEOPLAY_DIGITS_URL, {BEOPLAY_DIGITS_KEY: int(digit)})
+
+    ###############################################################
+    # ADDITIONAL ENDPOINTS - Non Blocking
+    # Mapped live from Beosound Stage + CA17 (2026-06). Write payloads
+    # verified against real devices; see docs/api-kartlegging.md.
+    ###############################################################
+
+    async def async_ping(self) -> bool:
+        """Cheap liveness probe. GET /Ping returns 200 with an empty body
+        on a reachable device — lighter than fetching /BeoDevice just to
+        check whether the speaker is online. Returns True on 200."""
+        if self._clientsession is None:
+            LOG.error("Attempt asyncio with no ClientSession")
+            return False
+        try:
+            async with self._clientsession.get(
+                BASE_URL.format(self._host, BEOPLAY_URL_PING),
+                timeout=aiohttp.ClientTimeout(total=TIMEOUT),
+            ) as resp:
+                return resp.status == 200
+        except (asyncio.TimeoutError, aiohttp.ClientError) as _e:
+            LOG.info("Client error %s on %s", str(_e), self._name)
+            return False
+
+    async def async_all_standby(self):
+        """Put the entire Beolink setup into standby (powerState 'allStandby').
+
+        Unlike async_standby() which only affects this device, this powers
+        down every networked B&O product at once — the classic "turn
+        everything off" behaviour. Use with care."""
+        await self.async_postReq(
+            "PUT", BEOPLAY_URL_STANDBY, {"standby": {"powerState": "allStandby"}}
+        )
+        self.on = False
+
+    async def async_reboot(self):
+        """Reboot this device (powerState 'reboot'). Takes ~1-2 minutes to
+        come back. Valid per the standby endpoint's _capabilities enum."""
+        await self.async_postReq(
+            "PUT", BEOPLAY_URL_STANDBY, {"standby": {"powerState": "reboot"}}
+        )
+        self.on = False
+
+    async def async_get_default_volume(self):
+        """Return the startup (default) volume level (0-100), or None.
+
+        GET /BeoZone/Zone/Sound/Volume/Speaker/DefaultLevel -> {"defaultLevel": n}.
+        Note this is the correct path; the older .../Speaker/Default 404s on
+        current firmware."""
+        r = await self.async_getReq(BEOPLAY_URL_DEFAULT_VOLUME)
+        if r and "defaultLevel" in r:
+            return r["defaultLevel"]
+        return None
+
+    async def async_set_default_volume(self, level: int):
+        """Set the startup (default) volume level (0-100).
+
+        PUT {"defaultLevel": <int>} to .../Speaker/DefaultLevel."""
+        return await self.async_postReq(
+            "PUT", BEOPLAY_URL_DEFAULT_VOLUME, {"defaultLevel": int(level)}
+        )
+
+    async def async_get_sound_adjustment(self):
+        """Return the bass/treble/loudness adjustment, or None.
+
+        GET /BeoZone/Zone/Sound/Adjustment ->
+            {"adjustment": {"bass": -10..10, "treble": -10..10, "loudness": bool, ...}}
+        The nested _capabilities.range gives the valid bass/treble range."""
+        r = await self.async_getReq(BEOPLAY_URL_SOUND_ADJUSTMENT)
+        if r and "adjustment" in r:
+            return r["adjustment"]
+        return None
+
+    async def async_set_sound_adjustment(self, bass: int = None, treble: int = None,
+                                         loudness: bool = None):
+        """Set bass, treble and/or loudness. Partial updates are accepted —
+        only pass the fields you want to change.
+
+        PUT {"adjustment": {"bass": n, "treble": n, "loudness": bool}}."""
+        adj = {}
+        if bass is not None:
+            adj["bass"] = int(bass)
+        if treble is not None:
+            adj["treble"] = int(treble)
+        if loudness is not None:
+            adj["loudness"] = bool(loudness)
+        if not adj:
+            return False
+        return await self.async_postReq(
+            "PUT", BEOPLAY_URL_SOUND_ADJUSTMENT, {"adjustment": adj}
+        )
+
+    async def async_reset_sound_adjustment(self):
+        """Reset bass/treble/loudness to defaults (PUT .../Adjustment/reset)."""
+        return await self.async_postReq(
+            "PUT", BEOPLAY_URL_SOUND_ADJUSTMENT + "/reset"
+        )
+
+    async def async_get_sound_explore(self):
+        """Return the Sound Explore DSP settings (Beosound Stage), or None.
+
+        On devices that support it (feature SOUND_EXPLORE — e.g. Stage),
+        GET /BeoZone/Zone/Sound/Explore ->
+            {"explore": {"toneTouch": {...}, "contentProcessing": "off|low|high",
+                         "upmix": bool, "virtualize": bool, "lfeTuning": bool, ...}}
+        Devices without it (e.g. CA17) return their ToneTouch instead and a
+        GET here 404s; Stage's ToneTouch endpoint conversely 501s and points
+        here."""
+        r = await self.async_getReq(BEOPLAY_URL_SOUND_EXPLORE)
+        if r and "explore" in r:
+            return r["explore"]
+        return None
+
+    async def async_set_sound_explore(self, content_processing: str = None,
+                                      upmix: bool = None, virtualize: bool = None,
+                                      lfe_tuning: bool = None):
+        """Set Sound Explore DSP options (Beosound Stage). Partial updates OK.
+
+        content_processing: 'off' | 'low' | 'high'
+        upmix / virtualize / lfe_tuning: bool
+
+        PUT {"explore": {...}}."""
+        exp = {}
+        if content_processing is not None:
+            exp["contentProcessing"] = content_processing
+        if upmix is not None:
+            exp["upmix"] = bool(upmix)
+        if virtualize is not None:
+            exp["virtualize"] = bool(virtualize)
+        if lfe_tuning is not None:
+            exp["lfeTuning"] = bool(lfe_tuning)
+        if not exp:
+            return False
+        return await self.async_postReq(
+            "PUT", BEOPLAY_URL_SOUND_EXPLORE, {"explore": exp}
+        )
+
+    async def async_get_buffer_setup(self):
+        """Return the net-radio buffer time in seconds (feature
+        BUFFER_SETUP_NETRADIO), or None.
+
+        GET /BeoZone/Zone/Sound/BufferSetup -> {"netRadio": {"bufferTime": n, ...}}.
+        _capabilities.range lists the discrete valid steps (e.g. 0, 2-3,
+        5-20/5, 30-60/15)."""
+        r = await self.async_getReq(BEOPLAY_URL_BUFFER_SETUP)
+        if r and "netRadio" in r:
+            return r["netRadio"].get("bufferTime")
+        return None
+
+    async def async_set_buffer_setup(self, seconds: int):
+        """Set the net-radio buffer time (seconds). Value must match one of
+        the discrete steps the device reports in its capabilities."""
+        return await self.async_postReq(
+            "PUT", BEOPLAY_URL_BUFFER_SETUP, {"netRadio": {"bufferTime": int(seconds)}}
+        )
+
+    async def async_get_sleep_timer(self):
+        """Return the sleep-timer duration in minutes (0 = inactive), or None.
+
+        GET /BeoDevice/powerManagement/sleepTimer ->
+            {"sleepTimer": {"duration": 0..60, ...}}."""
+        r = await self.async_getReq(BEOPLAY_URL_SLEEP_TIMER)
+        if r and "sleepTimer" in r:
+            return r["sleepTimer"].get("duration")
+        return None
+
+    async def async_set_sleep_timer(self, minutes: int):
+        """Arm the sleep timer (0-60 minutes). After the duration elapses the
+        device goes to standby.
+
+        PUT {"sleepTimer": {"duration": <int>}}."""
+        return await self.async_postReq(
+            "PUT", BEOPLAY_URL_SLEEP_TIMER, {"sleepTimer": {"duration": int(minutes)}}
+        )
+
+    async def async_cancel_sleep_timer(self):
+        """Cancel a running sleep timer (DELETE .../sleepTimer; duration -> 0)."""
+        return await self.async_postReq("DELETE", BEOPLAY_URL_SLEEP_TIMER)
+
+    async def async_get_snapshots(self):
+        """Return the list of device-side snapshot buttons, or None.
+
+        GET /BeoZone/Zone/Snapshot ->
+            {"snapshot": {"list": [{"id": "button-...", "elements": [...],
+                                    "sourceId": "...", ...}, ...]}}
+        Each button stores a scene (source, and on some devices soundMode).
+        Stage exposes its physical button-tv / button-music here in addition
+        to button-mybutton-1..4."""
+        r = await self.async_getReq(BEOPLAY_URL_SNAPSHOT)
+        if r and "snapshot" in r:
+            return r["snapshot"].get("list", [])
+        return None
+
+    async def async_activate_snapshot(self, snapshot_id: str):
+        """Recall a stored snapshot/scene (PUT .../Snapshot/Activate/<id>)."""
+        return await self.async_postReq(
+            "PUT", f"{BEOPLAY_URL_SNAPSHOT}/Activate/{snapshot_id}"
+        )
+
+    async def async_persist_snapshot(self, snapshot_id: str):
+        """Store the current state onto a snapshot button
+        (PUT .../Snapshot/Persist/<id>)."""
+        return await self.async_postReq(
+            "PUT", f"{BEOPLAY_URL_SNAPSHOT}/Persist/{snapshot_id}"
+        )
+
+    async def async_reset_snapshot(self, snapshot_id: str):
+        """Clear a snapshot button (PUT .../Snapshot/Reset/<id>)."""
+        return await self.async_postReq(
+            "PUT", f"{BEOPLAY_URL_SNAPSHOT}/Reset/{snapshot_id}"
+        )
+
+    async def async_get_home_timers(self):
+        """Return the device-side alarm/timer list, or None.
+
+        GET /BeoHome/trigger/timerList -> {"timerList": {"timer": [...]}}.
+        Present on speakers (Stage, CA17), absent on the BeoLink Converter.
+        Creating timers (POST) is not implemented here: the 'active' field
+        takes an undocumented enum that still needs to be captured from a
+        timer created via the official Beo app."""
+        r = await self.async_getReq(BEOPLAY_URL_HOME_TIMERS)
+        if r and "timerList" in r:
+            return r["timerList"].get("timer", [])
+        return None
 
 
     ###############################################################
