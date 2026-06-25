@@ -68,6 +68,7 @@ class BeoPlay(object):
         # The following are only going ot be valid after a call to getSources
         # Sources
         self.source = None
+        self.source_id = None
         self.sources = []
         self.sourcesID = []
         self.sourcesBorrowed = []
@@ -179,7 +180,7 @@ class BeoPlay(object):
                 LOG.debug("Request Json: %s", json)
                 return json
         except (asyncio.TimeoutError, aiohttp.ClientError) as _e:
-            LOG.info("Client error %s on %s" , str(_e), self._name)
+            LOG.info("Client error %s on %s" , repr(_e), self._name)
             raise
 
     async def async_postReq(self, type, path, jsondata: dict = {}):
@@ -229,7 +230,7 @@ class BeoPlay(object):
             else:
                 return False
         except (asyncio.TimeoutError, aiohttp.ClientError) as _e:
-            LOG.info("Client error %s on %s" , str(_e), self._name)
+            LOG.info("Client error %s on %s" , repr(_e), self._name)
             raise
         return True
 
@@ -271,7 +272,7 @@ class BeoPlay(object):
                     return False
 
         except (asyncio.TimeoutError, aiohttp.ClientError) as _e:
-            LOG.info("Client error %s on %s" , str(_e), self._name)
+            LOG.info("Client error %s on %s" , repr(_e), self._name)
             raise
 
         return True
@@ -281,12 +282,23 @@ class BeoPlay(object):
     ###############################################################
 
     async def async_get_source(self):
-        """Returns the current source, or None if not retrieved."""
+        """Returns the current source friendlyName, or None if not retrieved.
+
+        Also populates self.source_id (the source id, e.g. 'spotify:...@...') and the
+        grouping state (primary_jid, listeners, role) from the same ActiveSources payload,
+        so consumers get the id and multiroom role without waiting for a notification."""
         self.source = None
+        self.source_id = None
         r = await self.async_getReq(BEOPLAY_URL_ACTIVE_SOURCES)
         if r:
-            self.source = r["primaryExperience"]["source"]["friendlyName"] if "friendlyName" in r["primaryExperience"]["source"] else None
-            self.listeners = [listener["jid"] for listener in r["primaryExperience"]["listenerList"]["listener"]] if "listenerList" in r["primaryExperience"] else []
+            primary = r.get("primaryExperience") or {}
+            source = primary.get("source") or {}
+            self.source = source.get("friendlyName")
+            self.source_id = source.get("id")
+            if primary:
+                self._update_grouping_from_primary_experience(primary)
+            else:
+                self._clear_grouping_state()
         return self.source
 
     # edited to only include in Use sources
@@ -381,16 +393,28 @@ class BeoPlay(object):
     ###############################################################
 
     async def async_get_volume(self):
-        """Fetch current speaker volume. Sets self.volume (0-1 range)."""
+        """Fetch current speaker volume and range. Sets self.volume (0-1).
+
+        The Speaker/Level resource also carries the device volume range, so capture
+        min_volume/max_volume here too — they would otherwise stay None until the first
+        VOLUME notification, leaving consumers unable to scale (devices differ, e.g. 0..50
+        vs 0..90)."""
         r = await self.async_getReq(BEOPLAY_URL_SET_VOLUME)
         if r and "level" in r:
             self.volume = r["level"] / 100
+            if isinstance(r.get("range"), dict):
+                if "minimum" in r["range"]:
+                    self.min_volume = r["range"]["minimum"] / 100
+                if "maximum" in r["range"]:
+                    self.max_volume = r["range"]["maximum"] / 100
         return self.volume
 
     async def async_set_volume(self, volume):
-        self.volume = volume
-        volume = int(volume * 100)
-        await self.async_postReq("PUT", BEOPLAY_URL_SET_VOLUME, {"level": volume})
+        # store the quantized level we actually send (int(volume*100)/100) rather than the
+        # raw input, so a read-back of self.volume matches what the device received
+        level = int(volume * 100)
+        self.volume = level / 100
+        await self.async_postReq("PUT", BEOPLAY_URL_SET_VOLUME, {"level": level})
 
     async def async_set_mute(self, mute):
         if mute:
@@ -749,7 +773,7 @@ class BeoPlay(object):
             ) as resp:
                 return resp.status == 200
         except (asyncio.TimeoutError, aiohttp.ClientError) as _e:
-            LOG.info("Client error %s on %s", str(_e), self._name)
+            LOG.info("Client error %s on %s", repr(_e), self._name)
             return False
 
     async def async_all_standby(self):
@@ -1259,13 +1283,20 @@ class BeoPlay(object):
             self.role = None
 
     def _update_grouping_from_primary_experience(self, primary_experience: dict) -> None:
-        """Extract primary_jid + listeners from a notification's
-        primaryExperience block and recompute role. Shared between
-        SOURCE and SOURCE_EXPERIENCE_CHANGED notifications."""
+        """Extract primary_jid + listeners from a primaryExperience block and recompute
+        role. Shared between the SOURCE/SOURCE_EXPERIENCE_CHANGED notifications and the
+        ActiveSources GET."""
         source = primary_experience.get("source") or {}
         product = source.get("product") or {}
         self.primary_jid = product.get("jid")
-        self.listeners = primary_experience.get("listener", []) or []
+        # listeners live under listenerList.listener as [{"jid": ...}, ...]; normalize to
+        # a flat list of jid strings so consumers never see the raw dict shape
+        listeners = (primary_experience.get("listenerList") or {}).get("listener") or []
+        self.listeners = [
+            listener["jid"]
+            for listener in listeners
+            if isinstance(listener, dict) and "jid" in listener
+        ]
         self._recompute_role()
 
     def _processSource(self, data):
@@ -1275,12 +1306,14 @@ class BeoPlay(object):
         ):
             if not data["notification"]["data"]:
                 self.source = None
+                self.source_id = None
                 self.state = None
                 self.on = False
                 self._clear_grouping_state()
             else:
                 primary = data["notification"]["data"]["primaryExperience"]
                 self.source = primary["source"]["friendlyName"]
+                self.source_id = primary["source"].get("id")
                 self.state = primary["state"]
                 self.on = True
                 self._update_grouping_from_primary_experience(primary)
