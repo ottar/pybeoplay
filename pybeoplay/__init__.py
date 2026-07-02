@@ -12,7 +12,6 @@ https://widdowquinn.github.io/coding/update-pypi-package/
 import requests
 import aiohttp
 import asyncio
-from aiohttp import ClientResponse
 import json
 import logging
 from typing import Optional
@@ -37,7 +36,7 @@ class BeoPlay(object):
         )
         self._connfail = 0
         self._clientsession = session
-        # The following are only going ot be valid after a call to getDeviceInfo
+        # The following are only going to be valid after a call to getDeviceInfo
         # device information
         self._name = None
         self._serialNumber = None
@@ -46,7 +45,7 @@ class BeoPlay(object):
         self._typeName = None
         self._softwareVersion = None
         self._hardwareVersion = None
-        # The following are only going ot be valid after a call to getMediaInfo, getStandby
+        # The following are only going to be valid after a call to getMediaInfo, getStandby
         # Or, they are updated by the Notifications task. The actual field updated by
         # Notifications varies by device. Some devices for example provide notifications when
         # Sound mode changes (e.g., Stage), others (e.g., BeoVision Avant 55) don't.
@@ -65,7 +64,7 @@ class BeoPlay(object):
         self.media_country = None
         self.media_languages = None
         self.primary_experience = None
-        # The following are only going ot be valid after a call to getSources
+        # The following are only going to be valid after a call to getSources
         # Sources
         self.source = None
         self.source_id = None
@@ -76,11 +75,11 @@ class BeoPlay(object):
         # Extra attributes for tracking primary experience
         self.role = None
         self.primary_jid = None
-        # The following are only going ot be valid after a call to getSoundModes
+        # The following are only going to be valid after a call to getSoundModes
         # Sound modes
         self._soundMode = None
         self._soundModes = {}
-        # The following are only going ot be valid after a call to getStandPosition
+        # The following are only going to be valid after a call to getStandPosition
         # Stand control
         self._standPosition = None
         self._standPositions = {}
@@ -102,7 +101,7 @@ class BeoPlay(object):
 
     @property
     def itemNumber(self):
-        """Return the device serial number."""
+        """Return the device item number."""
         return self._itemNumber
 
     @property
@@ -117,12 +116,12 @@ class BeoPlay(object):
 
     @property
     def softwareVersion(self):
-        """Return the device serial number."""
+        """Return the device software version."""
         return self._softwareVersion
 
     @property
     def hardwareVersion(self):
-        """Return the device serial number."""
+        """Return the device hardware version."""
         return self._hardwareVersion
 
     @property
@@ -165,25 +164,31 @@ class BeoPlay(object):
     ###############################################################
 
     async def async_getReq(self, path):
-        """Non blocking GET call to the speaker, with a given path."""
+        """Non blocking GET call to the speaker, with a given path.
+
+        Returns the parsed JSON on 200, ``None`` on any other status or
+        when no ClientSession was provided. Connection errors and
+        timeouts are logged and re-raised for the caller to handle.
+        """
         if self._clientsession is None:
             LOG.error("Attempt asyncio with no ClientSession")
-            return
+            return None
         try:
             async with self._clientsession.get(
-                BASE_URL.format(self._host, path)
+                BASE_URL.format(self._host, path),
+                timeout=aiohttp.ClientTimeout(total=TIMEOUT),
             ) as resp:
                 LOG.debug("Request Status: %s", str(resp.status))
                 if resp.status != 200:
                     return None
-                json = await resp.json()
-                LOG.debug("Request Json: %s", json)
-                return json
+                data = await resp.json()
+                LOG.debug("Request Json: %s", data)
+                return data
         except (asyncio.TimeoutError, aiohttp.ClientError) as _e:
             LOG.info("Client error %s on %s" , repr(_e), self._name)
             raise
 
-    async def async_postReq(self, type, path, jsondata: dict = {}):
+    async def async_postReq(self, type, path, jsondata: Optional[dict] = None):
         """Non blocking POST/PUT/DELETE call to the speaker.
 
         ``type``: ``"PUT"`` | ``"POST"`` | ``"DELETE"``
@@ -198,37 +203,22 @@ class BeoPlay(object):
         """
         if self._clientsession is None:
             LOG.error("Attempt asyncio with no ClientSession")
-            return
+            return False
+        if type not in ("PUT", "POST", "DELETE"):
+            return False
+        kwargs = {"timeout": aiohttp.ClientTimeout(total=TIMEOUT)}
+        if type != "DELETE":
+            # PUT/POST always carry a JSON body; the empty dict {} is what
+            # the B&O endpoints expect for body-less commands (Play, Pause...)
+            kwargs["json"] = jsondata if jsondata is not None else {}
         try:
-            if type == "PUT":
-                async with self._clientsession.put(
-                    BASE_URL.format(self._host, path), json=jsondata, timeout=aiohttp.ClientTimeout(total=TIMEOUT)
-                ) as resp:
-                    if not (200 <= resp.status < 300):
-                        body = await resp.text()
-                        LOG.warning("PUT %s status=%s body=%s", path, resp.status, body[:200])
-                        return False
-                    LOG.debug("Status: %s", resp.status)
-            elif type == "POST":
-                async with self._clientsession.post(
-                    BASE_URL.format(self._host, path), json=jsondata, timeout=aiohttp.ClientTimeout(total=TIMEOUT)
-                ) as resp:
-                    if not (200 <= resp.status < 300):
-                        body = await resp.text()
-                        LOG.warning("POST %s status=%s body=%s", path, resp.status, body[:200])
-                        return False
-                    LOG.debug("Status: %s", resp.status)
-            elif type == "DELETE":
-                async with self._clientsession.delete(
-                    BASE_URL.format(self._host, path), timeout=aiohttp.ClientTimeout(total=TIMEOUT)
-                ) as resp:
-                    if not (200 <= resp.status < 300):
-                        body = await resp.text()
-                        LOG.warning("DELETE %s status=%s body=%s", path, resp.status, body[:200])
-                        return False
-                    LOG.debug("Status: %s", resp.status)
-            else:
-                return False
+            request = getattr(self._clientsession, type.lower())
+            async with request(BASE_URL.format(self._host, path), **kwargs) as resp:
+                if not (200 <= resp.status < 300):
+                    body = await resp.text()
+                    LOG.warning("%s %s status=%s body=%s", type, path, resp.status, body[:200])
+                    return False
+                LOG.debug("Status: %s", resp.status)
         except (asyncio.TimeoutError, aiohttp.ClientError) as _e:
             LOG.info("Client error %s on %s" , repr(_e), self._name)
             raise
@@ -236,7 +226,7 @@ class BeoPlay(object):
 
     async def async_notificationsTask(self, callback=None) -> bool:
         """
-        Async notifications taks that can be used to keep track of the speaker actions.
+        Async notifications task that can be used to keep track of the speaker actions.
         B&O speakers disconnect after 5 minutes of inactivity, so restart the task if this exits.
         This function automatically updates the internal state of the BeoPlay object.
 
@@ -257,9 +247,18 @@ class BeoPlay(object):
                             )
                             if len(data) > 0:
                                 LOG.info("Update status: %s %s", self._name, data)
-                                data_json = json.loads(data)
+                                # one malformed line must not kill the whole
+                                # notification stream — log and keep reading
+                                try:
+                                    data_json = json.loads(data)
+                                except ValueError:
+                                    LOG.warning(
+                                        "Ignoring malformed notification line from %s: %s",
+                                        self._name, data[:200],
+                                    )
+                                    continue
                                 self._processNotification(data_json)
-                                if callback is not None:
+                                if callback is not None and "notification" in data_json:
                                     callback(data_json["notification"])
                         else:
                             break
@@ -306,23 +305,26 @@ class BeoPlay(object):
         """Returns a list of available sources, or None if not retrieved."""
         r = await self.async_getReq(BEOPLAY_URL_GET_SOURCES)
         if r:
-            # clear previously stored sources
-            self.sources = []
-            self.sourcesID = []
-            self.sourcesBorrowed = []
-            for elements in r:
-                i = 0
-                while i < len(r[elements]):
-                    if r[elements][i][1]["inUse"] == True:
-                        self.sourcesBorrowed.append(r[elements][i][1]["borrowed"])
-                        self.sources.append(r[elements][i][1]["friendlyName"])
-                        self.sourcesID.append(r[elements][i][0])
-                    i += 1
+            self._store_sources(r)
             return self.sources
-        return
+        return None
+
+    def _store_sources(self, r: dict) -> None:
+        """Populate sources/sourcesID/sourcesBorrowed from a Sources response,
+        keeping only the sources that are in use. Clears any previous state so
+        repeated refreshes don't accumulate duplicates."""
+        self.sources = []
+        self.sourcesID = []
+        self.sourcesBorrowed = []
+        for element_list in r.values():
+            for source_id, source in element_list:
+                if source.get("inUse"):
+                    self.sourcesBorrowed.append(source.get("borrowed"))
+                    self.sources.append(source.get("friendlyName"))
+                    self.sourcesID.append(source_id)
 
     async def async_get_standby(self) -> bool:
-        """Returns True of the device is on, False if off or unavailable."""
+        """Returns True if the device is on, False if off or unavailable."""
         r = await self.async_getReq(BEOPLAY_URL_STANDBY)
         if r:
             if r["standby"]["powerState"] == "on":
@@ -342,15 +344,20 @@ class BeoPlay(object):
         """Returns a dictionary of available sound modes, or None if not retrieved."""
         r = await self.async_getReq(BEOPLAY_URL_GET_SOUND_MODE)
         if r:
-            r = r.get("mode", {"list": []})
-            l = r.get("list", [])
-            a = r.get("active", None)
-            for element in l:
-                self._soundModes[element["friendlyName"]] = element["id"]
-                if a and a == element["id"]:
-                    self._soundMode = element["friendlyName"]
+            self._store_sound_modes(r)
             return self._soundModes
-        return
+        return None
+
+    def _store_sound_modes(self, r: dict) -> None:
+        """Populate _soundModes/_soundMode from a Sound/Mode response. Clears
+        any previous state so stale modes don't linger between refreshes."""
+        self._soundModes = {}
+        mode = r.get("mode", {})
+        active = mode.get("active")
+        for element in mode.get("list", []):
+            self._soundModes[element["friendlyName"]] = element["id"]
+            if active and active == element["id"]:
+                self._soundMode = element["friendlyName"]
     
     async def async_get_stand_position(self):
         """Returns the stand position, or None if not retrieved."""
@@ -463,16 +470,16 @@ class BeoPlay(object):
             self.on = True
 
     async def async_set_source(self, source):
-        i = 0
-        while i < len(self.sources):
-            if self.sources[i] == source:
-                chosenSource = self.sourcesID[i]
-                await self.async_postReq(
-                    "POST",
-                    BEOPLAY_URL_ACTIVE_SOURCES,
-                    {"primaryExperience": {"source": {"id": chosenSource}}},
-                )
-            i += 1
+        """Select a source by its friendlyName (as listed in self.sources)."""
+        if source not in self.sources:
+            LOG.warning("Source %s not found in %s", source, self.sources)
+            return
+        chosenSource = self.sourcesID[self.sources.index(source)]
+        await self.async_postReq(
+            "POST",
+            BEOPLAY_URL_ACTIVE_SOURCES,
+            {"primaryExperience": {"source": {"id": chosenSource}}},
+        )
 
     async def async_set_sound_mode(self, soundMode):
         # get sound modes if not already done
@@ -987,17 +994,17 @@ class BeoPlay(object):
             if self._connfail:
                 LOG.debug("Connfail: %i", self._connfail)
                 self._connfail -= 1
-                return False
+                return None
             r = requests.get(BASE_URL.format(self._host, path), timeout=TIMEOUT)
             if r.status_code != 200:
                 return None
-            return json.loads(r.text)
+            return r.json()
         except requests.exceptions.RequestException as err:
             LOG.debug("Exception: %s", str(err))
             self._connfail = CONNFAILCOUNT
             return None
 
-    def _postReq(self, type, path, data: dict = {}):
+    def _postReq(self, type, path, data: Optional[dict] = None):
         try:
             r = None
             if self._connfail:
@@ -1007,7 +1014,7 @@ class BeoPlay(object):
             if type == "PUT":
                 r = requests.put(
                     BASE_URL.format(self._host, path),
-                    json=data,
+                    json=data if data is not None else {},
                     timeout=TIMEOUT,
                 )
             elif type == "POST":
@@ -1023,10 +1030,12 @@ class BeoPlay(object):
                     )
             elif type == "DELETE":
                 r = requests.delete(BASE_URL.format(self._host, path), timeout=TIMEOUT)
-            if r:
+            if r is not None:
                 LOG.debug("Response: %s", r.content)
-                if r.status_code == 200:
+                # accept any 2xx: B&O uses 200/201/202/204 depending on endpoint
+                if 200 <= r.status_code < 300:
                     return True
+                LOG.warning("%s %s status=%s body=%s", type, path, r.status_code, r.text[:200])
             return False
         except requests.exceptions.RequestException as err:
             LOG.debug("Exception: %s", str(err))
@@ -1041,21 +1050,23 @@ class BeoPlay(object):
     def getSources(self):
         r = self._getReq(BEOPLAY_URL_GET_SOURCES)
         if r:
-            for elements in r:
-                i = 0
-                while i < len(r[elements]):
-                    if r[elements][i][1]["inUse"] == True:
-                        self.sourcesBorrowed.append(r[elements][i][1]["borrowed"])
-                        self.sources.append(r[elements][i][1]["friendlyName"])
-                        self.sourcesID.append(r[elements][i][0])
-                    i += 1
+            self._store_sources(r)
 
     def getSource(self):
         self.source = None
+        self.source_id = None
         r = self._getReq(BEOPLAY_URL_ACTIVE_SOURCES)
         if r:
-            self.source = r["primaryExperience"]["source"]["friendlyName"] if "friendlyName" in r["primaryExperience"]["source"] else None
-            self.listeners = [listener["jid"] for listener in r["primaryExperience"]["listenerList"]["listener"]] if "listenerList" in r["primaryExperience"] else []
+            primary = r.get("primaryExperience") or {}
+            source = primary.get("source") or {}
+            self.source = source.get("friendlyName")
+            self.source_id = source.get("id")
+            listeners = (primary.get("listenerList") or {}).get("listener") or []
+            self.listeners = [
+                listener["jid"]
+                for listener in listeners
+                if isinstance(listener, dict) and "jid" in listener
+            ]
         return self.source
 
     def getStandby(self):
@@ -1067,7 +1078,7 @@ class BeoPlay(object):
                 self.on = False
 
     def getSoundMode(self):
-        """ Get sound mode. Return the current active sound mode or None if not retreived."""
+        """ Get sound mode. Return the current active sound mode or None if not retrieved."""
         self._soundMode = None
         self.getSoundModes()
         return self._soundMode
@@ -1076,13 +1087,7 @@ class BeoPlay(object):
         """ Get sound modes. You need to call this before reading soundMode or soundModes."""
         r = self._getReq(BEOPLAY_URL_GET_SOUND_MODE)
         if r:
-            r = r.get("mode", {"list": []})
-            l = r.get("list", [])
-            a = r.get("active", None)
-            for element in l:
-                self._soundModes[element["friendlyName"]] = element["id"]
-                if a and a == element["id"]:
-                    self._soundMode = element["friendlyName"]
+            self._store_sound_modes(r)
             return self._soundModes
         return None
 
@@ -1120,9 +1125,10 @@ class BeoPlay(object):
     ###############################################################
 
     def setVolume(self, volume):
-        self.volume = volume
-        volume = int(volume * 100)
-        self._postReq("PUT", BEOPLAY_URL_SET_VOLUME, {"level": volume})
+        # store the quantized level we actually send (parity with async_set_volume)
+        level = int(volume * 100)
+        self.volume = level / 100
+        self._postReq("PUT", BEOPLAY_URL_SET_VOLUME, {"level": level})
 
     def setMute(self, mute):
         if mute:
@@ -1171,16 +1177,16 @@ class BeoPlay(object):
             self.on = True
 
     def setSource(self, source):
-        i = 0
-        while i < len(self.sources):
-            if self.sources[i] == source:
-                chosenSource = self.sourcesID[i]
-                self._postReq(
-                    "POST",
-                    BEOPLAY_URL_ACTIVE_SOURCES,
-                    {"primaryExperience": {"source": {"id": chosenSource}}},
-                )
-            i += 1
+        """Select a source by its friendlyName (as listed in self.sources)."""
+        if source not in self.sources:
+            LOG.warning("Source %s not found in %s", source, self.sources)
+            return
+        chosenSource = self.sourcesID[self.sources.index(source)]
+        self._postReq(
+            "POST",
+            BEOPLAY_URL_ACTIVE_SOURCES,
+            {"primaryExperience": {"source": {"id": chosenSource}}},
+        )
 
     def setSoundMode(self, soundMode):
         """Get sound modes if not already done."""
@@ -1195,7 +1201,7 @@ class BeoPlay(object):
         self._postReq("PUT", BEOPLAY_URL_SET_SOUND_MODE, {"active": soundModeId})
 
     def setStandPosition(self, standPosition):
-        """Get sound modes if not already done."""
+        """Set the stand position; fetches stand positions if not already done."""
         if not self._standPositions:
             self.getStandPositions()
         
@@ -1312,9 +1318,10 @@ class BeoPlay(object):
                 self._clear_grouping_state()
             else:
                 primary = data["notification"]["data"]["primaryExperience"]
-                self.source = primary["source"]["friendlyName"]
-                self.source_id = primary["source"].get("id")
-                self.state = primary["state"]
+                source = primary.get("source") or {}
+                self.source = source.get("friendlyName")
+                self.source_id = source.get("id")
+                self.state = primary.get("state")
                 self.on = True
                 self._update_grouping_from_primary_experience(primary)
             self.media_url = None
@@ -1370,14 +1377,15 @@ class BeoPlay(object):
 
     def _processMusicInfo(self, data):
         if data["notification"]["type"] == "NOW_PLAYING_STORED_MUSIC":
-            if data["notification"]["data"]["trackImage"]:
-                self.media_url = data["notification"]["data"]["trackImage"][0]["url"]
+            payload = data["notification"]["data"] or {}
+            if payload.get("trackImage"):
+                self.media_url = payload["trackImage"][0].get("url")
             else:
                 self.media_url = None
-            self.media_artist = data["notification"]["data"]["artist"]
-            self.media_album = data["notification"]["data"]["album"]
-            self.media_track = data["notification"]["data"]["name"]
-            self.media_genre = data["notification"]["data"]["genre"]
+            self.media_artist = payload.get("artist")
+            self.media_album = payload.get("album")
+            self.media_track = payload.get("name")
+            self.media_genre = payload.get("genre")
             self.media_country = None
             self.media_languages = None
 
@@ -1413,7 +1421,7 @@ class BeoPlay(object):
                 self.media_genre = data["notification"]["data"]["genre"]
             if "country" in data["notification"]["data"]:
                 self.media_country = data["notification"]["data"]["country"]
-            if "languages" in data["notification"]["data"]["languages"]:
+            if "languages" in data["notification"]["data"]:
                 self.media_languages = data["notification"]["data"]["languages"]
 
         elif data["notification"]["type"] == "NOW_PLAYING_LEGACY":
@@ -1458,19 +1466,21 @@ class BeoPlay(object):
 
 
     def _processNotification(self, data):
-        """Cumulative process all the potential notification information."""
-        try:
-            # get volume
-            self._processVolume(data)
-            # get source
-            self._processSource(data)
-            # get source experience
-            self._processSourceExperienceChanged(data)
-            # get state
-            self._processState(data)
-            # get currently playing music info
-            self._processMusicInfo(data)
-            # get sound mode
-            self._processSoundMode(data)
-        except KeyError:
-            LOG.debug("Malformed notification: %s", str(data))
+        """Cumulative process all the potential notification information.
+
+        Each processor is isolated so one malformed field can't prevent the
+        remaining processors from seeing the notification."""
+        for processor in (
+            self._processVolume,                    # volume
+            self._processSource,                    # source
+            self._processSourceExperienceChanged,   # source experience / grouping
+            self._processState,                     # play state
+            self._processMusicInfo,                 # currently playing music info
+            self._processSoundMode,                 # sound mode
+        ):
+            try:
+                processor(data)
+            except (KeyError, IndexError, TypeError):
+                LOG.debug(
+                    "Malformed notification in %s: %s", processor.__name__, str(data)
+                )
