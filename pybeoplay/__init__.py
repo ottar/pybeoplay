@@ -984,6 +984,102 @@ class BeoPlay(object):
             return r["timerList"].get("timer", [])
         return None
 
+    async def async_get_radio_favorites(self):
+        """Return the device's net-radio (TuneIn/BeoRadio) favourite stations
+        as a list of ``{"name": <str>, "station": <stationId str>}`` dicts,
+        or [] if the device has none / doesn't expose them.
+
+        GET /BeoContent/radio/netRadioProfile/favoriteList only returns the
+        list containers ('favorite' = user favourites, 'presetDefault'), so
+        each container's stations are fetched from
+        favoriteList/<listId>/favoriteListStation. Devices that don't expose
+        BeoContent are retried via the netRadio source listing. Station ids
+        can be fed to async_play_radio_station; duplicates across the lists
+        are removed (first list wins)."""
+        favorites = []
+        r = await self.async_getReq(BEOPLAY_URL_RADIO_FAVORITES)
+        if r:
+            containers = (r.get("favoriteListList") or {}).get("favoriteList") or []
+            for container in containers:
+                if not isinstance(container, dict) or not container.get("id"):
+                    continue
+                stations = await self.async_getReq(
+                    f"{BEOPLAY_URL_RADIO_FAVORITES}/{container['id']}/favoriteListStation"
+                )
+                if stations:
+                    favorites.extend(self._parse_radio_favorites(stations))
+        if not favorites:
+            r = await self.async_getReq(BEOPLAY_URL_RADIO_FAVORITES_FALLBACK)
+            if r:
+                favorites = self._parse_radio_favorites(r)
+        seen = set()
+        unique = []
+        for favorite in favorites:
+            if favorite["station"] not in seen:
+                seen.add(favorite["station"])
+                unique.append(favorite)
+        return unique
+
+    @staticmethod
+    def _parse_radio_favorites(data) -> list:
+        """Collect {"name", "station"} pairs from a favourite-station payload.
+
+        The exact nesting varies by device/firmware (favoriteListStationList
+        vs. single favoriteListStation, station under 'station' or inline),
+        so walk the whole payload for objects carrying both an id and a
+        display name."""
+        out = []
+
+        def walk(obj):
+            if isinstance(obj, dict):
+                station_id = obj.get("stationId") or obj.get("id")
+                name = obj.get("name") or obj.get("friendlyName")
+                if station_id and name and isinstance(name, str):
+                    out.append({"name": name, "station": str(station_id)})
+                for value in obj.values():
+                    walk(value)
+            elif isinstance(obj, list):
+                for value in obj:
+                    walk(value)
+
+        walk(data)
+        return out
+
+    async def async_play_radio_station(self, station_id, instantplay: bool = True):
+        """Start a TuneIn net-radio station by its stationId (e.g. 's24860'
+        or a numeric id from async_get_radio_favorites). Convenience wrapper
+        around async_play_queue_item."""
+        queue_item = {
+            "playQueueItem": {
+                "behaviour": "planned",
+                "station": {"tuneIn": {"stationId": str(station_id)}, "image": []},
+            }
+        }
+        await self.async_play_queue_item(instantplay, queue_item)
+
+    async def async_get_volume_range(self):
+        """Return the speaker volume limits as {"minimum": n, "maximum": n}
+        (device 0-100 scale), or None. Also refreshes min_volume/max_volume."""
+        r = await self.async_getReq(BEOPLAY_URL_VOLUME_RANGE)
+        if r and isinstance(r.get("range"), dict):
+            if "minimum" in r["range"]:
+                self.min_volume = r["range"]["minimum"] / 100
+            if "maximum" in r["range"]:
+                self.max_volume = r["range"]["maximum"] / 100
+            return r["range"]
+        return None
+
+    async def async_set_max_volume(self, level: int):
+        """Set the speaker's maximum volume limit (device 0-100 scale).
+        Updates self.max_volume on success."""
+        ok = await self.async_postReq(
+            "PUT", BEOPLAY_URL_VOLUME_RANGE,
+            {"range": {"maximum": {"level": int(level)}}},
+        )
+        if ok:
+            self.max_volume = int(level) / 100
+        return ok
+
 
     ###############################################################
     # REQUESTS (BLOCKING) NETWORK CALLS

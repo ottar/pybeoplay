@@ -46,6 +46,13 @@ BEOPLAY_URL_SLEEP_TIMER = 'BeoDevice/powerManagement/sleepTimer'     # GET/PUT/D
 BEOPLAY_URL_SNAPSHOT = 'BeoZone/Zone/Snapshot'                       # device-side scene buttons
 BEOPLAY_URL_HOME_TIMERS = 'BeoHome/trigger/timerList'               # device-side alarms/timers
 BEOPLAY_URL_PING = 'Ping'                                            # cheap liveness check (200, empty body)
+BEOPLAY_URL_VOLUME_RANGE = 'BeoZone/Zone/Sound/Volume/Speaker/Range' # min/max volume limits
+
+# Net-radio (TuneIn) favourite stations. The favourite list lives under
+# BeoContent on most devices; some only expose the stations through the
+# netRadio source listing, so keep both paths and try them in order.
+BEOPLAY_URL_RADIO_FAVORITES = 'BeoContent/radio/netRadioProfile/favoriteList'
+BEOPLAY_URL_RADIO_FAVORITES_FALLBACK = 'BeoZone/Zone/Sources/netRadio'
 
 # Valid powerState values for BeoDevice/powerManagement/standby (from _capabilities).
 # 'allStandby' powers down the whole Beolink setup; 'reboot' restarts the device.
