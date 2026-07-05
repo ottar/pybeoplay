@@ -745,11 +745,10 @@ class BeoPlay(object):
 
         """
         if instantplay:
-            await self.async_postReq(
+            return await self.async_postReq(
                 "POST", BEOPLAY_URL_PLAYQUEUE + BEOPLAY_URL_PLAYQUEUE_INSTANT, queueItem
             )
-        else:
-            await self.async_postReq("POST", BEOPLAY_URL_PLAYQUEUE, queueItem)
+        return await self.async_postReq("POST", BEOPLAY_URL_PLAYQUEUE, queueItem)
 
     async def async_remote_command(self, command : str, toBeReleased :bool = False):
         """
@@ -1082,7 +1081,28 @@ class BeoPlay(object):
                 "station": {"tuneIn": {"stationId": str(station_id)}, "image": []},
             }
         }
-        await self.async_play_queue_item(instantplay, queue_item)
+        return await self.async_play_queue_item(instantplay, queue_item)
+
+    async def async_play_beoradio_station(self, source_id, content_id):
+        """Start a specific B&O Radio ("BEO RADIO" source) station.
+
+        Unlike TuneIn (async_play_radio_station), B&O Radio stations are not
+        played via the play queue — that returns 403 "PQ with id radio
+        doesn't exist!". Instead the station is selected by activating the
+        BEO RADIO source with the station's ``contentId`` (== stationId, as
+        seen in the notification stream / async_get_radio_favorites):
+
+            POST /BeoZone/Zone/ActiveSources
+            {"primaryExperience": {"source": {"id": <source_id>}},
+             "contentId": <content_id>}
+
+        ``source_id`` is the beoradio source id (e.g. 'beoradio:...@...').
+        Returns the POST result."""
+        payload = {
+            "primaryExperience": {"source": {"id": source_id}},
+            "contentId": str(content_id),
+        }
+        return await self.async_postReq("POST", BEOPLAY_URL_ACTIVE_SOURCES, payload)
 
     async def async_get_volume_range(self):
         """Return the speaker volume limits as {"minimum": n, "maximum": n}
