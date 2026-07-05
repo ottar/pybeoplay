@@ -568,6 +568,33 @@ class BeoPlay(object):
         payload = {"primaryExperience": {"source": {"id": source_id}}}
         return await self.async_postReq("POST", BEOPLAY_URL_ACTIVE_SOURCES, payload)
 
+    async def async_join_master(self, master: "BeoPlay",
+                                retries: int = 6, delay: float = 0.5):
+        """Join this speaker onto ``master``'s active experience (targeted
+        A → B multiroom join): read the master's active source-id and borrow
+        it on this speaker.
+
+        A master that has just been told to start a source needs a moment
+        before its ActiveSources reports the new primaryExperience, so the
+        read is polled (``retries`` attempts, ``delay`` seconds apart)
+        instead of failing on the first empty response — avoids a race when
+        start-source and join fire back to back.
+
+        Returns True on success, False if the master never reported an
+        active source or the borrow was rejected."""
+        source_id = None
+        for _ in range(retries):
+            active = await master.async_get_active_sources()
+            if active:
+                source = (active.get("primaryExperience") or {}).get("source") or {}
+                source_id = source.get("id")
+            if source_id:
+                break
+            await asyncio.sleep(delay)
+        if not source_id:
+            return False
+        return await self.async_borrow_source(source_id)
+
     async def async_clear_queue(self):
         """Delete all items from the play queue."""
         await self.async_postReq("DELETE", BEOPLAY_URL_PLAYQUEUE)
